@@ -101,7 +101,7 @@ func Parse(r io.Reader, bin string) (ParseResult, error) {
 // parse parses, post-processes and verifies the trace. It returns the
 // trace version and the list of events.
 func parse(r io.Reader, bin string) (int, ParseResult, error) {
-	ver, rawEvents, strings, err := readTrace(r)
+	ver, rawEvents, strings, err := ReadTrace(r)
 	if err != nil {
 		return 0, ParseResult{}, err
 	}
@@ -128,17 +128,19 @@ func parse(r io.Reader, bin string) (int, ParseResult, error) {
 	return ver, ParseResult{Events: events, Stacks: stacks}, nil
 }
 
-// rawEvent is a helper type used during parsing.
-type rawEvent struct {
-	off   int
-	typ   byte
-	args  []uint64
-	sargs []string
+// RawEvent is a helper type used during parsing.
+// This is not public in the Go repo, but we make it public here.
+type RawEvent struct {
+	Off   int
+	Typ   byte
+	Args  []uint64
+	Aargs []string
 }
 
-// readTrace does wire-format parsing and verification.
+// ReadTrace does wire-format parsing and verification.
 // It does not care about specific event types and argument meaning.
-func readTrace(r io.Reader) (ver int, events []rawEvent, strings map[uint64]string, err error) {
+// This is not public in the Go repo, but we make it public here.
+func ReadTrace(r io.Reader) (ver int, events []RawEvent, strings map[uint64]string, err error) {
 	// Read and validate trace header.
 	var buf [16]byte
 	off, err := io.ReadFull(r, buf[:])
@@ -226,7 +228,7 @@ func readTrace(r io.Reader) (ver int, events []rawEvent, strings map[uint64]stri
 			strings[id] = string(buf)
 			continue
 		}
-		ev := rawEvent{typ: typ, off: off0}
+		ev := RawEvent{Typ: typ, Off: off0}
 		if narg < inlineArgs {
 			for i := 0; i < int(narg); i++ {
 				var v uint64
@@ -235,7 +237,7 @@ func readTrace(r io.Reader) (ver int, events []rawEvent, strings map[uint64]stri
 					err = fmt.Errorf("failed to read event %v argument at offset %v (%v)", typ, off, err)
 					return
 				}
-				ev.args = append(ev.args, v)
+				ev.Args = append(ev.Args, v)
 			}
 		} else {
 			// More than inlineArgs args, the first value is length of the event in bytes.
@@ -253,18 +255,18 @@ func readTrace(r io.Reader) (ver int, events []rawEvent, strings map[uint64]stri
 					err = fmt.Errorf("failed to read event %v argument at offset %v (%v)", typ, off, err)
 					return
 				}
-				ev.args = append(ev.args, v)
+				ev.Args = append(ev.Args, v)
 			}
 			if evLen != uint64(off-off1) {
 				err = fmt.Errorf("event has wrong length at offset 0x%x: want %v, got %v", off0, evLen, off-off1)
 				return
 			}
 		}
-		switch ev.typ {
+		switch ev.Typ {
 		case EvUserLog: // EvUserLog records are followed by a value string of length ev.args[len(ev.args)-1]
 			var s string
 			s, off, err = readStr(r, off)
-			ev.sargs = append(ev.sargs, s)
+			ev.Aargs = append(ev.Aargs, s)
 		}
 		events = append(events, ev)
 	}
@@ -314,7 +316,7 @@ func parseHeader(buf []byte) (int, error) {
 
 // Parse events transforms raw events into events.
 // It does analyze and verify per-event-type arguments.
-func parseEvents(ver int, rawEvents []rawEvent, strings map[uint64]string) (events []*Event, stacks map[uint64][]*Frame, err error) {
+func parseEvents(ver int, rawEvents []RawEvent, strings map[uint64]string) (events []*Event, stacks map[uint64][]*Frame, err error) {
 	var ticksPerSec, lastSeq, lastTs int64
 	var lastG uint64
 	var lastP int
@@ -323,30 +325,30 @@ func parseEvents(ver int, rawEvents []rawEvent, strings map[uint64]string) (even
 	stacks = make(map[uint64][]*Frame)
 	batches := make(map[int][]*Event) // events by P
 	for _, raw := range rawEvents {
-		desc := EventDescriptions[raw.typ]
+		desc := EventDescriptions[raw.Typ]
 		if desc.Name == "" {
-			err = fmt.Errorf("missing description for event type %v", raw.typ)
+			err = fmt.Errorf("missing description for event type %v", raw.Typ)
 			return
 		}
 		narg := argNum(raw, ver)
-		if len(raw.args) != narg {
+		if len(raw.Args) != narg {
 			err = fmt.Errorf("%v has wrong number of arguments at offset 0x%x: want %v, got %v",
-				desc.Name, raw.off, narg, len(raw.args))
+				desc.Name, raw.Off, narg, len(raw.Args))
 			return
 		}
-		switch raw.typ {
+		switch raw.Typ {
 		case EvBatch:
 			lastGs[lastP] = lastG
-			lastP = int(raw.args[0])
+			lastP = int(raw.Args[0])
 			lastG = lastGs[lastP]
 			if ver < 1007 {
-				lastSeq = int64(raw.args[1])
-				lastTs = int64(raw.args[2])
+				lastSeq = int64(raw.Args[1])
+				lastTs = int64(raw.Args[2])
 			} else {
-				lastTs = int64(raw.args[1])
+				lastTs = int64(raw.Args[1])
 			}
 		case EvFrequency:
-			ticksPerSec = int64(raw.args[0])
+			ticksPerSec = int64(raw.Args[0])
 			if ticksPerSec <= 0 {
 				// The most likely cause for this is tick skew on different CPUs.
 				// For example, solaris/amd64 seems to have wildly different
@@ -355,69 +357,69 @@ func parseEvents(ver int, rawEvents []rawEvent, strings map[uint64]string) (even
 				return
 			}
 		case EvTimerGoroutine:
-			timerGoids[raw.args[0]] = true
+			timerGoids[raw.Args[0]] = true
 		case EvStack:
-			if len(raw.args) < 2 {
+			if len(raw.Args) < 2 {
 				err = fmt.Errorf("EvStack has wrong number of arguments at offset 0x%x: want at least 2, got %v",
-					raw.off, len(raw.args))
+					raw.Off, len(raw.Args))
 				return
 			}
-			size := raw.args[1]
+			size := raw.Args[1]
 			if size > 1000 {
 				err = fmt.Errorf("EvStack has bad number of frames at offset 0x%x: %v",
-					raw.off, size)
+					raw.Off, size)
 				return
 			}
 			want := 2 + 4*size
 			if ver < 1007 {
 				want = 2 + size
 			}
-			if uint64(len(raw.args)) != want {
+			if uint64(len(raw.Args)) != want {
 				err = fmt.Errorf("EvStack has wrong number of arguments at offset 0x%x: want %v, got %v",
-					raw.off, want, len(raw.args))
+					raw.Off, want, len(raw.Args))
 				return
 			}
-			id := raw.args[0]
+			id := raw.Args[0]
 			if id != 0 && size > 0 {
 				stk := make([]*Frame, size)
 				for i := 0; i < int(size); i++ {
 					if ver < 1007 {
-						stk[i] = &Frame{PC: raw.args[2+i]}
+						stk[i] = &Frame{PC: raw.Args[2+i]}
 					} else {
-						pc := raw.args[2+i*4+0]
-						fn := raw.args[2+i*4+1]
-						file := raw.args[2+i*4+2]
-						line := raw.args[2+i*4+3]
+						pc := raw.Args[2+i*4+0]
+						fn := raw.Args[2+i*4+1]
+						file := raw.Args[2+i*4+2]
+						line := raw.Args[2+i*4+3]
 						stk[i] = &Frame{PC: pc, Fn: strings[fn], File: strings[file], Line: int(line)}
 					}
 				}
 				stacks[id] = stk
 			}
 		default:
-			e := &Event{Off: raw.off, Type: raw.typ, P: lastP, G: lastG}
+			e := &Event{Off: raw.Off, Type: raw.Typ, P: lastP, G: lastG}
 			var argOffset int
 			if ver < 1007 {
-				e.seq = lastSeq + int64(raw.args[0])
-				e.Ts = lastTs + int64(raw.args[1])
+				e.seq = lastSeq + int64(raw.Args[0])
+				e.Ts = lastTs + int64(raw.Args[1])
 				lastSeq = e.seq
 				argOffset = 2
 			} else {
-				e.Ts = lastTs + int64(raw.args[0])
+				e.Ts = lastTs + int64(raw.Args[0])
 				argOffset = 1
 			}
 			lastTs = e.Ts
 			for i := argOffset; i < narg; i++ {
 				if i == narg-1 && desc.Stack {
-					e.StkID = raw.args[i]
+					e.StkID = raw.Args[i]
 				} else {
-					e.Args[i-argOffset] = raw.args[i]
+					e.Args[i-argOffset] = raw.Args[i]
 				}
 			}
-			switch raw.typ {
+			switch raw.Typ {
 			case EvGoStart, EvGoStartLocal, EvGoStartLabel:
 				lastG = e.Args[0]
 				e.G = lastG
-				if raw.typ == EvGoStartLabel {
+				if raw.Typ == EvGoStartLabel {
 					e.SArgs = []string{strings[e.Args[2]]}
 				}
 			case EvGCSTWStart:
@@ -448,14 +450,14 @@ func parseEvents(ver int, rawEvents []rawEvent, strings map[uint64]string) (even
 				e.SArgs = []string{strings[e.Args[2]]}
 			case EvUserLog:
 				// e.Args 0: taskID, 1:keyID, 2: stackID
-				e.SArgs = []string{strings[e.Args[1]], raw.sargs[0]}
+				e.SArgs = []string{strings[e.Args[1]], raw.Aargs[0]}
 			case EvCPUSample:
 				e.Ts = int64(e.Args[0])
 				e.P = int(e.Args[1])
 				e.G = e.Args[2]
 				e.Args[0] = 0
 			}
-			switch raw.typ {
+			switch raw.Typ {
 			default:
 				batches[lastP] = append(batches[lastP], e)
 			case EvCPUSample:
@@ -986,16 +988,16 @@ func (ev *Event) String() string {
 
 // argNum returns total number of args for the event accounting for timestamps,
 // sequence numbers and differences between trace format versions.
-func argNum(raw rawEvent, ver int) int {
-	desc := EventDescriptions[raw.typ]
-	if raw.typ == EvStack {
-		return len(raw.args)
+func argNum(raw RawEvent, ver int) int {
+	desc := EventDescriptions[raw.Typ]
+	if raw.Typ == EvStack {
+		return len(raw.Args)
 	}
 	narg := len(desc.Args)
 	if desc.Stack {
 		narg++
 	}
-	switch raw.typ {
+	switch raw.Typ {
 	case EvBatch, EvFrequency, EvTimerGoroutine:
 		if ver < 1007 {
 			narg++ // there was an unused arg before 1.7
@@ -1006,7 +1008,7 @@ func argNum(raw rawEvent, ver int) int {
 	if ver < 1007 {
 		narg++ // sequence
 	}
-	switch raw.typ {
+	switch raw.Typ {
 	case EvGCSweepDone:
 		if ver < 1009 {
 			narg -= 2 // 1.9 added two arguments
